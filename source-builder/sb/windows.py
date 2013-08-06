@@ -48,8 +48,10 @@ def load():
                 if uname.endswith('WOW64'):
                     uname = 'cygwin'
                     build_triple = hosttype + '-pc-' + uname
-                    hosttype = 'x86_64'
-                    host_triple = hosttype + '-w64-' + system
+                    #hosttype = 'x86_64'
+                    #host_triple = hosttype + '-w64-' + system
+                    hosttype = 'i686'
+                    host_triple = hosttype + '-pc-' + system
                 else:
                     raise error.general('invalid uname for Windows')
             else:
