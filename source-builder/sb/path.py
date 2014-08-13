@@ -23,6 +23,7 @@
 # level. This allows macro expansion to work.
 #
 
+import log
 import os
 import shutil
 import string
@@ -137,6 +138,54 @@ def expand(name, paths):
     for p in paths:
         l += [join(p, name)]
     return l
+
+def copy_tree(src, dst):
+    hsrc = host(src)
+    hdst = host(dst)
+
+    if os.path.exists(src):
+        names = os.listdir(src)
+    else:
+        names = []
+
+    if not os.path.isdir(dst):
+        os.makedirs(dst)
+
+    for name in names:
+        srcname = os.path.join(src, name)
+        dstname = os.path.join(dst, name)
+        try:
+            if os.path.islink(srcname):
+                linkto = os.readlink(srcname)
+                if os.path.exists(dstname):
+                    if os.path.islink(dstname):
+                        dstlinkto = os.readlink(dstname)
+                        if linkto != dstlinkto:
+                            log.warning('copying tree: update of link does not match: %s -> %s' % \
+                                            (dstname, dstlinkto))
+                            os.remove(dstname)
+                    else:
+                        log.warning('copying tree: destination is not a link: %s' % \
+                                        (dstname))
+                        os.remove(dstname)
+                else:
+                    os.symlink(linkto, dstname)
+            elif os.path.isdir(srcname):
+                copy_tree(srcname, dstname)
+            else:
+                shutil.copy2(srcname, dstname)
+        except shutil.Error, err:
+            raise error.general('copying tree: %s -> %s: %s' % (src, dst, str(err)))
+        except EnvironmentError, why:
+            raise error.general('copying tree: %s -> %s: %s' % (srcname, dstname, str(why)))
+    try:
+        shutil.copystat(src, dst)
+    except OSError, why:
+        if windows:
+            if WindowsError is not None and isinstance(why, WindowsError):
+                pass
+        else:
+            raise error.general('copying tree: %s -> %s: %s' % (src, dst, str(why)))
 
 if __name__ == '__main__':
     print host('/a/b/c/d-e-f')

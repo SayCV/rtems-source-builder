@@ -7,17 +7,6 @@
 %define rtems_arch avr
 
 #
-# The RTEMS 4.11 BSP to build and test
-#
-%define rtems_bsps      avrtest
-%define rtems_test_bsps avrtest
-
-#
-# The RTEMS 4.11 base defines.
-%define rtems_bsps      all
-%define rtems_test_bsps none
-
-#
 # The RTEMS 4.11 base defines.
 #
 %include rtems-4.11-base.bset
@@ -27,6 +16,11 @@
 #  configure: error: unable to detect exception model
 #
 %define enable_cxx 0
+
+#
+# Disable building ICONV support
+#
+%define with_iconv 0
 
 #
 # Set the build flags to work around the defaults in the
@@ -40,7 +34,7 @@
 #
 4.11/rtems-autotools
 devel/expat-2.1.0-1
-tools/rtems-binutils-2.23.2-1
-tools/rtems-gcc-4.8.1-newlib-cvs-1
-tools/rtems-gdb-7.6-1
+tools/rtems-binutils-2.24-1
+tools/rtems-gcc-4.8.3-newlib-cvs-1
+tools/rtems-gdb-7.7-1
 tools/rtems-kernel-4.11

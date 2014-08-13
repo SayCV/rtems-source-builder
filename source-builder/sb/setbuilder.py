@@ -24,7 +24,6 @@
 
 import copy
 import datetime
-import distutils.dir_util
 import glob
 import operator
 import os
@@ -34,11 +33,13 @@ try:
     import build
     import check
     import error
+    import ereport
     import log
     import mailer
     import options
     import path
     import reports
+    import sources
     import version
 except KeyboardInterrupt:
     print 'abort: user terminated'
@@ -59,7 +60,12 @@ class buildset:
         else:
             self.macros = copy.copy(macros)
         self.bset = bset
-        self.bset_pkg = '%s-%s-set' % (self.macros.expand('%{_target}'), self.bset)
+        _target = self.macros.expand('%{_target}')
+        if len(_target):
+            pkg_prefix = _target
+        else:
+            pkg_prefix = self.macros.expand('%{_host}')
+        self.bset_pkg = '%s-%s-set' % (pkg_prefix, self.bset)
         self.mail_header = ''
         self.mail_report = ''
         self.build_failure = None
@@ -83,19 +89,7 @@ class buildset:
     def copy(self, src, dst):
         log.output('copy: %s => %s' % (path.host(src), path.host(dst)))
         if not self.opts.dry_run():
-            if not os.path.isdir(path.host(src)):
-                raise error.general('copying tree: no source directory: %s' % \
-                                        (path.host(src)))
-            if not self.opts.dry_run():
-                try:
-                    files = distutils.dir_util.copy_tree(path.host(src),
-                                                         path.host(dst))
-                    for f in files:
-                        log.output(f)
-                except IOError, err:
-                    raise error.general('copying tree: %s -> %s: %s' % (src, dst, str(err)))
-                except distutils.errors.DistutilsFileError, err:
-                    raise error.general('copying tree: %s' % (str(err)))
+            path.copy_tree(src, dst)
 
     def report(self, _config, _build):
         if not _build.opts.get_arg('--no-report') \
@@ -242,6 +236,8 @@ class buildset:
                     self.bset_pkg = self.macros.expand(ls[1].strip())
                     self.macros['package'] = self.bset_pkg
                 elif ls[0][0] == '%':
+                    def err(msg):
+                        raise error.general('%s:%d: %s' % (self.bset, lc, msg))
                     if ls[0] == '%define':
                         if len(ls) > 2:
                             self.macros.define(ls[1].strip(),
@@ -255,9 +251,10 @@ class buildset:
                         self.macros.undefine(ls[1].strip())
                     elif ls[0] == '%include':
                         configs += self.parse(ls[1].strip())
-                    else:
-                        raise error.general('%s:%d: invalid directive in build set files: %s' % \
-                                                (self.bset, lc, l))
+                    elif ls[0] in ['%patch', '%source']:
+                        sources.process(ls[0][1:], ls[1:], self.macros, err)
+                    elif ls[0] == '%hash':
+                        sources.hash(ls[1:], self.macros, err)
                 else:
                     l = l.strip()
                     c = build.find_config(l, self.configs)
@@ -291,7 +288,11 @@ class buildset:
             configs = self.parse(bset)
         return configs
 
-    def build(self, deps = None):
+    def build(self, deps = None, nesting_count = 0):
+
+        build_error = False
+
+        nesting_count += 1
 
         log.trace('_bset: %s: make' % (self.bset))
         log.notice('Build Set: %s' % (self.bset))
@@ -299,17 +300,18 @@ class buildset:
         if self.opts.get_arg('--mail'):
             mail_report_subject = '%s %s' % (self.bset, self.macros.expand('%{_host}'))
 
-        configs = self.load()
-
-        log.trace('_bset: %s: configs: %s'  % (self.bset, ','.join(configs)))
-
         current_path = os.environ['PATH']
 
         start = datetime.datetime.now()
 
         mail_report = False
+        have_errors = False
 
         try:
+            configs = self.load()
+
+            log.trace('_bset: %s: configs: %s'  % (self.bset, ','.join(configs)))
+
             builds = []
             for s in range(0, len(configs)):
                 b = None
@@ -322,20 +324,24 @@ class buildset:
                     opts = copy.copy(self.opts)
                     macros = copy.copy(self.macros)
                     if configs[s].endswith('.bset'):
-                        log.trace('_bset: %s' % ('=' * 80))
+                        log.trace('_bset: == %2d %s' % (nesting_count + 1, '=' * 75))
                         bs = buildset(configs[s], self.configs, opts, macros)
-                        bs.build(deps)
+                        bs.build(deps, nesting_count)
                         del bs
                     elif configs[s].endswith('.cfg'):
                         mail_report = self.opts.get_arg('--mail')
-                        log.trace('_bset: %s' % ('-' * 80))
-                        b = build.build(configs[s], self.opts.get_arg('--pkg-tar-files'),
-                                        opts, macros)
+                        log.trace('_bset: -- %2d %s' % (nesting_count + 1, '-' * 75))
+                        try:
+                            b = build.build(configs[s], self.opts.get_arg('--pkg-tar-files'),
+                                            opts, macros)
+                        except:
+                            build_error = True
+                            raise
                         if b.macros.get('%{_disable_reporting}'):
                             mail_report = False
                         if deps is None:
                             self.build_package(configs[s], b)
-                            if s == len(configs) - 1:
+                            if s == len(configs) - 1 and not have_errors:
                                 self.bset_tar(b)
                         else:
                             deps += b.config.includes()
@@ -343,6 +349,7 @@ class buildset:
                     else:
                         raise error.general('invalid config type: %s' % (configs[s]))
                 except error.general, gerr:
+                    have_errors = True
                     if b is not None:
                         if self.build_failure is None:
                             self.build_failure = b.name()
@@ -360,9 +367,12 @@ class buildset:
                             raise
                     else:
                         raise
-            if deps is None and not self.opts.no_install():
+            if deps is None \
+               and not self.opts.no_install() \
+               and not have_errors:
                 for b in builds:
-                    if not b.disabled() \
+                    if not b.canadian_cross() \
+                       and not b.disabled() \
                        and not b.macros.get('%{_disable_installing}'):
                         self.install(b.name(),
                                      b.config.expand('%{buildroot}'),
@@ -376,6 +386,8 @@ class buildset:
             for b in builds:
                 del b
         except error.general, gerr:
+            if not build_error:
+                log.stderr(str(gerr))
             raise
         except KeyboardInterrupt:
             mail_report = False
@@ -424,6 +436,8 @@ def list_bset_cfg_files(opts, configs):
 
 def run():
     import sys
+    ec = 0
+    setbuilder_error = False
     try:
         optargs = { '--list-configs':  'List available configurations',
                     '--list-bsets':    'List available build sets',
@@ -435,6 +449,7 @@ def run():
         mailer.append_options(optargs)
         opts = options.load(sys.argv, optargs)
         log.notice('RTEMS Source Builder - Set Builder, v%s' % (version.str()))
+        opts.log_info()
         if not check.host_setup(opts):
             raise error.general('host build environment is not set up correctly')
         configs = build.get_configs(opts)
@@ -448,27 +463,32 @@ def run():
                     not path.ispathwritable(prefix):
                 raise error.general('prefix is not writable: %s' % (path.host(prefix)))
             for bset in opts.params():
+                setbuilder_error = True
                 b = buildset(bset, configs, opts)
                 b.build(deps)
-                del b
+                b = None
+                setbuilder_error = False
         if deps is not None:
             c = 0
             for d in sorted(set(deps)):
                 c += 1
                 print 'dep[%d]: %s' % (c, d)
     except error.general, gerr:
-        log.notice(str(gerr))
-        print >> sys.stderr, 'Build FAILED'
-        sys.exit(1)
+        if not setbuilder_error:
+            log.stderr(str(gerr))
+        log.stderr('Build FAILED')
+        ec = 1
     except error.internal, ierr:
-        log.notice(str(ierr))
-        sys.exit(1)
+        if not setbuilder_error:
+            log.stderr(str(ierr))
+        log.stderr('Internal Build FAILED')
+        ec = 1
     except error.exit, eerr:
         pass
     except KeyboardInterrupt:
         log.notice('abort: user terminated')
-        sys.exit(1)
-    sys.exit(0)
+        ec = 1
+    sys.exit(ec)
 
 if __name__ == "__main__":
     run()

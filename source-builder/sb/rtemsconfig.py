@@ -77,7 +77,7 @@ class command:
                     cmd = kwargs.get("args")
                     if cmd is None:
                         cmd = popenargs[0]
-                    raise CalledProcessError(retcode, cmd)
+                    raise subprocess.CalledProcessError(retcode, cmd)
                 return output
             subprocess.check_output = f
 
@@ -192,6 +192,7 @@ def run(args):
 
         if opts.get_arg('--list'):
             log.notice('RTEMS Source Builder - RTEMS Configuration, v%s' % (version.str()))
+            opts.log_info()
             configs = bsp.keys()
             for c in sorted(configs.keys()):
                 print c

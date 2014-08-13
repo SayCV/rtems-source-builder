@@ -22,6 +22,7 @@
 # installed not to be package unless you run a packager around this.
 #
 
+import hashlib
 import os
 import stat
 import sys
@@ -33,6 +34,68 @@ import error
 import git
 import log
 import path
+import sources
+
+def _humanize_bytes(bytes, precision = 1):
+    abbrevs = (
+        (1 << 50L, 'PB'),
+        (1 << 40L, 'TB'),
+        (1 << 30L, 'GB'),
+        (1 << 20L, 'MB'),
+        (1 << 10L, 'kB'),
+        (1, ' bytes')
+    )
+    if bytes == 1:
+        return '1 byte'
+    for factor, suffix in abbrevs:
+        if bytes >= factor:
+            break
+    return '%.*f%s' % (precision, float(bytes) / factor, suffix)
+
+def _hash_check(file_, absfile, macros, remove = True):
+    failed = False
+    hash = sources.get_hash(file_.lower(), macros)
+    if hash is not None:
+        hash = hash.split()
+        if len(hash) != 2:
+            raise error.internal('invalid hash format: %s' % (file_))
+        try:
+            hashlib_algorithms = hashlib.algorithms
+        except:
+            hashlib_algorithms = ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512']
+        if hash[0] not in hashlib_algorithms:
+            raise error.general('invalid hash algorithm for %s: %s' % (file_, hash[0]))
+        hasher = None
+        _in = None
+        try:
+            hasher = hashlib.new(hash[0])
+            _in = open(absfile, 'rb')
+            hasher.update(_in.read())
+        except IOError, err:
+            log.notice('hash: %s: read error: %s' % (file_, str(err)))
+            failed = True
+        except:
+            msg = 'hash: %s: error' % (file_)
+            log.stderr(msg)
+            log.notice(msg)
+            if _in is not None:
+                _in.close()
+            raise
+        if _in is not None:
+            _in.close()
+        log.output('checksums: %s: %s => %s' % (file_, hasher.hexdigest(), hash[1]))
+        if hasher.hexdigest() != hash[1]:
+            log.warning('checksum error: %s' % (file_))
+            failed = True
+        if failed and remove:
+            log.warning('removing: %s' % (file_))
+            if path.exists(absfile):
+                os.remove(path.host(absfile))
+        if hasher is not None:
+            del hasher
+    else:
+        log.warning('%s: no hash found' % (file_))
+    return not failed
 
 def _http_parser(source, config, opts):
     #
@@ -40,13 +103,20 @@ def _http_parser(source, config, opts):
     #
     esl = source['ext'].split('.')
     if esl[-1:][0] == 'gz':
+        source['compressed-type'] = 'gzip'
         source['compressed'] = '%{__gzip} -dc'
     elif esl[-1:][0] == 'bz2':
+        source['compressed-type'] = 'bzip2'
         source['compressed'] = '%{__bzip2} -dc'
     elif esl[-1:][0] == 'zip':
+        source['compressed-type'] = 'zip'
         source['compressed'] = '%{__zip} -u'
     elif esl[-1:][0] == 'xz':
+        source['compressed-type'] = 'xz'
         source['compressed'] = '%{__xz} -dc'
+
+def _patchworks_parser(source, config, opts):
+    source['url'] = 'http%s' % (source['path'][2:])
 
 def _git_parser(source, config, opts):
     #
@@ -118,6 +188,7 @@ def _file_parser(source, config, opts):
 
 parsers = { 'http': _http_parser,
             'ftp':  _http_parser,
+            'pw':   _patchworks_parser,
             'git':  _git_parser,
             'cvs':  _cvs_parser,
             'file': _file_parser }
@@ -128,9 +199,15 @@ def parse_url(url, pathkey, config, opts):
     #
     source = {}
     source['url'] = url
-    source['path'] = path.dirname(url)
+    colon = url.find(':')
+    if url[colon + 1:colon + 3] != '//':
+        raise error.general('malforned URL: %s' % (url))
+    source['path'] = url[:colon + 3] + path.dirname(url[colon + 3:])
     source['file'] = path.basename(url)
     source['name'], source['ext'] = path.splitext(source['file'])
+    if source['name'].endswith('.tar'):
+        source['name'] = source['name'][:-4]
+        source['ext'] = '.tar' + source['ext']
     #
     # Get the file. Checks the local source directory first.
     #
@@ -143,6 +220,7 @@ def parse_url(url, pathkey, config, opts):
         if path.exists(local):
             source['local_prefix'] = path.abspath(p)
             source['local'] = local
+            _hash_check(source['file'], local, config.macros)
             break
     source['script'] = ''
     for p in parsers:
@@ -160,15 +238,49 @@ def _http_downloader(url, local, config, opts):
     #
     if url.startswith('https://api.github.com'):
         url = urlparse.urljoin(url, config.expand('tarball/%{version}'))
-    log.notice('download: %s -> %s' % (url, os.path.relpath(path.host(local))))
+    dst = os.path.relpath(path.host(local))
+    log.notice('download: %s -> %s' % (url, dst))
     failed = False
     if not opts.dry_run():
         _in = None
         _out = None
+        _length = None
+        _have = 0
+        _chunk_size = 256 * 1024
+        _chunk = None
+        _last_percent = 200.0
+        _last_msg = ''
+        _wipe_output = False
         try:
-            _in = urllib2.urlopen(url)
-            _out = open(path.host(local), 'wb')
-            _out.write(_in.read())
+            try:
+                _in = urllib2.urlopen(url)
+                _out = open(path.host(local), 'wb')
+                try:
+                    _length = int(_in.info().getheader('Content-Length').strip())
+                except:
+                    pass
+                while True:
+                    _msg = '\rdownloading: %s - %s ' % (dst, _humanize_bytes(_have))
+                    if _length:
+                        _percent = round((float(_have) / _length) * 100, 2)
+                        if _percent != _last_percent:
+                            _msg += 'of %s (%0.0f%%) ' % (_humanize_bytes(_length), _percent)
+                    if _msg != _last_msg:
+                        extras = (len(_last_msg) - len(_msg))
+                        log.stdout_raw('%s%s' % (_msg, ' ' * extras + '\b' * extras))
+                        _last_msg = _msg
+                    _chunk = _in.read(_chunk_size)
+                    if not _chunk:
+                        break
+                    _out.write(_chunk)
+                    _have += len(_chunk)
+                if _wipe_output:
+                    log.stdout_raw('\r%s\r' % (' ' * len(_last_msg)))
+                else:
+                    log.stdout_raw('\n')
+            except:
+                log.stdout_raw('\n')
+                raise
         except IOError, err:
             log.notice('download: %s: error: %s' % (url, str(err)))
             if path.exists(local):
@@ -181,7 +293,7 @@ def _http_downloader(url, local, config, opts):
             failed = True
         except:
             msg = 'download: %s: error' % (url)
-            log.stderr(msd)
+            log.stderr(msg)
             log.notice(msg)
             if _out is not None:
                 _out.close()
@@ -193,6 +305,8 @@ def _http_downloader(url, local, config, opts):
         if not failed:
             if not path.isfile(local):
                 raise error.general('source is not a file: %s' % (path.host(local)))
+            if not _hash_check(path.basename(local), local, config.macros, False):
+                raise error.general('checksum failure file: %s' % (dst))
     return not failed
 
 def _git_downloader(url, local, config, opts):
@@ -203,9 +317,15 @@ def _git_downloader(url, local, config, opts):
         log.notice('git: clone: %s -> %s' % (us[0], rlp))
         if not opts.dry_run():
             repo.clone(us[0], local)
+    else:
+        repo.clean(['-f', '-d'])
+        repo.reset('--hard')
+        repo.checkout('master')
     for a in us[1:]:
         _as = a.split('=')
-        if _as[0] == 'branch':
+        if _as[0] == 'branch' or _as[0] == 'checkout':
+            if len(_as) != 2:
+                raise error.general('invalid git branch/checkout: %s' % (_as))
             log.notice('git: checkout: %s => %s' % (us[0], _as[1]))
             if not opts.dry_run():
                 repo.checkout(_as[1])
@@ -213,6 +333,12 @@ def _git_downloader(url, local, config, opts):
             log.notice('git: pull: %s' % (us[0]))
             if not opts.dry_run():
                 repo.pull()
+        elif _as[0] == 'submodule':
+            if len(_as) != 2:
+                raise error.general('invalid git submodule: %s' % (_as))
+            log.notice('git: submodule: %s <= %s' % (us[0], _as[1]))
+            if not opts.dry_run():
+                repo.submodule(_as[1])
         elif _as[0] == 'fetch':
             log.notice('git: fetch: %s -> %s' % (us[0], rlp))
             if not opts.dry_run():
@@ -280,6 +406,7 @@ def _file_downloader(url, local, config, opts):
 
 downloaders = { 'http': _http_downloader,
                 'ftp':  _http_downloader,
+                'pw':   _http_downloader,
                 'git':  _git_downloader,
                 'cvs':  _cvs_downloader,
                 'file': _file_downloader }
@@ -296,7 +423,7 @@ def get_file(url, local, opts, config):
     if not path.exists(local) and opts.download_disabled():
         raise error.general('source not found: %s' % (path.host(local)))
     #
-    # Check if a URL hasbeen provided on the command line.
+    # Check if a URL has been provided on the command line.
     #
     url_bases = opts.urls()
     urls = []
@@ -311,12 +438,12 @@ def get_file(url, local, opts, config):
             else:
                 url_file = url_path[slash + 1:]
             urls.append(urlparse.urljoin(base, url_file))
-    urls.append(url)
+    urls += url.split()
     log.trace('_url: %s -> %s' % (','.join(urls), local))
+    for url in urls:
+        for dl in downloaders:
+            if url.startswith(dl):
+                if downloaders[dl](url, local, config, opts):
+                    return
     if not opts.dry_run():
-        for url in urls:
-            for dl in downloaders:
-                if url.startswith(dl):
-                    if downloaders[dl](url, local, config, opts):
-                        return
         raise error.general('downloading %s: all paths have failed, giving up' % (url))

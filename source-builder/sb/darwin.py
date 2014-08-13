@@ -35,23 +35,37 @@ def load():
         ncpus = output.split(' ')[1].strip()
     else:
         ncpus = '1'
+    version = uname[2]
+    if version.find('.'):
+        version = version.split('.')[0]
     defines = {
-        '_ncpus':         ('none',    'none',     ncpus),
-        '_os':            ('none',    'none',     'darwin'),
-        '_host':          ('triplet', 'required', uname[4] + '-apple-darwin' + uname[2]),
-        '_host_vendor':   ('none',    'none',     'apple'),
-        '_host_os':       ('none',    'none',     'darwin'),
-        '_host_cpu':      ('none',    'none',     uname[4]),
-        '_host_alias':    ('none',    'none',     '%{nil}'),
-        '_host_arch':     ('none',    'none',     uname[4]),
-        '_usr':           ('dir',     'optional', '/usr/local'),
-        '_var':           ('dir',     'optional', '/usr/local/var'),
-        '_prefix':        ('dir',     'optional', '%{_usr}'),
-        '__ldconfig':     ('exe',     'none',     ''),
-        '__xz':           ('exe',     'required', '%{_usr}/bin/xz'),
-        'with_zlib':      ('none',    'none',     '--with-zlib=no'),
-        '_forced_static': ('none',    'none',     '')
+        '_ncpus':           ('none',    'none',     ncpus),
+        '_os':              ('none',    'none',     'darwin'),
+        '_host':            ('triplet', 'required', uname[4] + '-apple-darwin' + uname[2]),
+        '_host_vendor':     ('none',    'none',     'apple'),
+        '_host_os':         ('none',    'none',     'darwin'),
+        '_host_os_version': ('none',    'none',     version),
+        '_host_cpu':        ('none',    'none',     uname[4]),
+        '_host_alias':      ('none',    'none',     '%{nil}'),
+        '_host_arch':       ('none',    'none',     uname[4]),
+        '_usr':             ('dir',     'optional', '/usr/local'),
+        '_var':             ('dir',     'optional', '/usr/local/var'),
+        '_prefix':          ('dir',     'optional', '%{_usr}'),
+        '__ldconfig':       ('exe',     'none',     ''),
+        '__cvs':            ('exe',     'required', 'cvs'),
+        '__xz':             ('exe',     'required', '%{_usr}/bin/xz'),
+        'with_zlib':        ('none',    'none',     '--with-zlib=no'),
+        '_forced_static':   ('none',    'none',     ''),
+        '_ld_library_path': ('none',    'none',     'DYLD_LIBRARY_PATH')
         }
+
+    if version.find('.'):
+        version = version.split('.')[0]
+        if int(version) >= 13:
+            defines['__cc'] = ('exe',     'required', '/usr/bin/cc')
+            defines['__cxx'] = ('exe',     'required', '/usr/bin/c++')
+            defines['build_cflags'] = '-O2 -pipe -fbracket-depth=1024'
+            defines['build_cxxflags'] = '-O2 -pipe -fbracket-depth=1024'
 
     defines['_build']        = defines['_host']
     defines['_build_vendor'] = defines['_host_vendor']

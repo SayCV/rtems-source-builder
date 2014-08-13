@@ -50,10 +50,10 @@ class repo:
             self._git_exit_code(exit_code)
         return exit_code, output
 
-    def __init__(self, _path, opts, macros = None):
+    def __init__(self, _path, opts = None, macros = None):
         self.path = _path
         self.opts = opts
-        if macros is None:
+        if macros is None and opts is not None:
             self.macros = opts.defaults
         else:
             self.macros = macros
@@ -94,6 +94,14 @@ class repo:
     def checkout(self, branch = 'master'):
         ec, output = self._run(['checkout', branch], check = True)
 
+    def submodule(self, module):
+        ec, output = self._run(['submodule', 'update', '--init', module], check = True)
+
+    def clean(self, args = []):
+        if type(args) == str:
+            args = [args]
+        ec, output = self._run(['clean'] + args, check = True)
+
     def status(self):
         _status = {}
         if path.exists(self.path):
@@ -101,27 +109,33 @@ class repo:
             if ec == 0:
                 state = 'none'
                 for l in output.split('\n'):
-                    if l.startswith('# On branch '):
-                        _status['branch'] = l[len('# On branch '):]
-                    elif l.startswith('# Changes to be committed:'):
+                    if l.startswith('# '):
+                        l = l[2:]
+                    if l.startswith('On branch '):
+                        _status['branch'] = l[len('On branch '):]
+                    elif l.startswith('Changes to be committed:'):
                         state = 'staged'
-                    elif l.startswith('# Changes not staged for commit:'):
+                    elif l.startswith('Changes not staged for commit:'):
                         state = 'unstaged'
-                    elif l.startswith('# Untracked files:'):
+                    elif l.startswith('Untracked files:'):
                         state = 'untracked'
-                    elif state != 'none' and l[0] == '#':
-                        if l.strip() != '#' and not l.startswith('#   ('):
-                            if state not in _status:
-                                _status[state] = []
-                            l = l[1:]
-                            if ':' in l:
-                                l = l.split(':')[1]
-                            _status[state] += [l.strip()]
+                    elif l.startswith('HEAD detached'):
+                        state = 'detached'
+                    elif state != 'none' and len(l.strip()) != 0:
+                        if l[0].isspace():
+                            l = l.strip()
+                            if l[0] != '(':
+                                if state not in _status:
+                                    _status[state] = []
+                                l = l[1:]
+                                if ':' in l:
+                                    l = l.split(':')[1]
+                                _status[state] += [l.strip()]
         return _status
 
-    def clean(self):
+    def dirty(self):
         _status = self.status()
-        return len(_status) == 1 and 'branch' in _status
+        return not (len(_status) == 1 and 'branch' in _status)
 
     def valid(self):
         if path.exists(self.path):

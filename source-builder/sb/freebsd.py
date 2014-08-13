@@ -1,6 +1,6 @@
 #
 # RTEMS Tools Project (http://www.rtems.org/)
-# Copyright 2010-2012 Chris Johns (chrisj@rtems.org)
+# Copyright 2010-2014 Chris Johns (chrisj@rtems.org)
 # All rights reserved.
 #
 # This file is part of the RTEMS Tools package in 'rtems-tools'.
@@ -28,6 +28,7 @@ import pprint
 import os
 
 import check
+import error
 import execute
 
 def load():
@@ -47,23 +48,24 @@ def load():
     if version.find('-') > 0:
         version = version.split('-')[0]
     defines = {
-        '_ncpus':        ('none',    'none',     ncpus),
-        '_os':           ('none',    'none',     'freebsd'),
-        '_host':         ('triplet', 'required', cpu + '-freebsd' + version),
-        '_host_vendor':  ('none',    'none',     'pc'),
-        '_host_os':      ('none',    'none',     'freebsd'),
-        '_host_cpu':     ('none',    'none',     cpu),
-        '_host_alias':   ('none',    'none',     '%{nil}'),
-        '_host_arch':    ('none',    'none',     cpu),
-        '_usr':          ('dir',     'required', '/usr/local'),
-        '_var':          ('dir',     'optional', '/usr/local/var'),
-        '__bash':        ('exe',     'optional', '/usr/local/bin/bash'),
-        '__bison':       ('exe',     'required', '/usr/local/bin/bison'),
-        '__git':         ('exe',     'required', '/usr/local/bin/git'),
-        '__svn':         ('exe',     'required', '/usr/local/bin/svn'),
-        '__xz':          ('exe',     'optional', '/usr/bin/xz'),
-        '__make':        ('exe',     'required', 'gmake'),
-        '__patch_opts':  ('none',     'none',    '-E')
+        '_ncpus':           ('none',    'none',     ncpus),
+        '_os':              ('none',    'none',     'freebsd'),
+        '_host':            ('triplet', 'required', cpu + '-freebsd' + version),
+        '_host_vendor':     ('none',    'none',     'pc'),
+        '_host_os':         ('none',    'none',     'freebsd'),
+        '_host_os_version': ('none',    'none',     version),
+        '_host_cpu':        ('none',    'none',     cpu),
+        '_host_alias':      ('none',    'none',     '%{nil}'),
+        '_host_arch':       ('none',    'none',     cpu),
+        '_usr':             ('dir',     'required', '/usr/local'),
+        '_var':             ('dir',     'optional', '/usr/local/var'),
+        '__bash':           ('exe',     'optional', '/usr/local/bin/bash'),
+        '__bison':          ('exe',     'required', '/usr/local/bin/bison'),
+        '__git':            ('exe',     'required', '/usr/local/bin/git'),
+        '__svn':            ('exe',     'required', '/usr/local/bin/svn'),
+        '__xz':             ('exe',     'optional', '/usr/bin/xz'),
+        '__make':           ('exe',     'required', 'gmake'),
+        '__patch_opts':     ('none',     'none',    '-E')
         }
 
     defines['_build']        = defines['_host']
@@ -72,6 +74,37 @@ def load():
     defines['_build_cpu']    = defines['_host_cpu']
     defines['_build_alias']  = defines['_host_alias']
     defines['_build_arch']   = defines['_host_arch']
+
+    # FreeBSD 10 and above no longer have /usr/bin/cvs, but it can (e.g.) be
+    # installed to /usr/local/bin/cvs through the devel/cvs port
+    if int(float(version)) >= 10:
+        #
+        # FreeBSD has switched to clang plus gcc. On 10.0 cc is gcc based and
+        # clang is provided however it is not building binutils-2.24.
+        #
+        cc = '/usr/bin/cc'
+        if check.check_exe(cc, cc):
+            defines['__cc'] = cc
+        else:
+            cc = '/usr/bin/clang'
+            if not check.check_exe(cc, cc):
+                raise error.general('no valid cc not found')
+        cxx = '/usr/bin/c++'
+        if check.check_exe(cxx, cxx):
+            defines['__cxx'] = cxx
+        else:
+            cxx = '/usr/bin/clang++'
+            if check.check_exe(cxx, cxx):
+                raise error.general('no valid c++ not found')
+            defines['build_cflags'] = '-O2 -pipe -fbracket-depth=1024'
+            defines['build_cxxflags'] = '-O2 -pipe -fbracket-depth=1024'
+        cvs = 'cvs'
+        if check.check_exe(cvs, cvs):
+            defines['__cvs'] = cvs
+        #
+        # Fix the mess iconv is on FreeBSD 10.0.
+        #
+        defines['iconv_includes'] = ('none', 'none', '-I/usr/local/include -L/usr/local/lib')
 
     for gv in ['47', '48', '49']:
         gcc = '%s-portbld-freebsd%s-gcc%s' % (cpu, version, gv)
